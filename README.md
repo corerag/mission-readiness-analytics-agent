@@ -105,6 +105,24 @@ This is what makes it a *reusable* `KernelFunction` rather than a one-off
 string: the template is registered once in `build_kernel()`, and each call
 site supplies its own `topic` without touching the function definition.
 
+## `get_unit_status` and `compare_units` topics
+
+Unlike `confirm_status`'s free-form `{{$topic}}`, these two native functions
+take a `unit` (or `unit_a`/`unit_b`) argument that's checked against a fixed
+mock dataset in `ReadinessDataPlugin._MOCK_READINESS`. Matching is
+case-insensitive and trims whitespace (`unit.strip().lower()`), but the name
+otherwise has to match one of:
+
+- `"Alpha Company"` — 78% ready, 2 vehicles down for maintenance
+- `"Bravo Company"` — 92% ready, fully equipped
+- `"Charlie Company"` — 61% ready, awaiting ammunition resupply
+
+Anything else raises `UnitNotFoundError` — see the *Error handling* point
+above for how that's caught (directly, via `kernel.invoke`) or handled
+automatically (via the auto function-calling loop) depending on the call
+site. `main.py`'s `"Delta Company"` calls exist specifically to exercise
+that path.
+
 ## Notes
 
 - `.env` holds live credentials and is gitignored — never commit it.
