@@ -48,6 +48,46 @@ client pointed at the `/openai/v1` endpoint and handing that to
 `OpenAIChatCompletion` (SK's generic, non-Azure connector) instead. See
 `build_kernel()` in `main.py`.
 
+## `AsyncOpenAI` client setup
+
+`build_kernel()` constructs the model connection in two steps rather than
+letting `OpenAIChatCompletion` read environment variables itself:
+
+```python
+async_client = AsyncOpenAI(
+    base_url=AZURE_OPENAI_ENDPOINT,
+    api_key=AZURE_OPENAI_API_KEY,
+)
+
+kernel.add_service(
+    OpenAIChatCompletion(
+        service_id=SERVICE_ID,
+        ai_model_id=AZURE_OPENAI_DEPLOYMENT,
+        async_client=async_client,
+    )
+)
+```
+
+- **`AsyncOpenAI(base_url=..., api_key=...)`** is the plain OpenAI Python
+  SDK's client, constructed by hand rather than through any Semantic Kernel
+  API. `base_url` is `AZURE_OPENAI_ENDPOINT` from `.env`
+  (`https://<resource>.services.ai.azure.com/openai/v1`) — see *A gotcha
+  worth knowing* above for why it has to be this specific URL shape.
+- **`ai_model_id=AZURE_OPENAI_DEPLOYMENT`** is the Foundry *deployment* name
+  (`mini-mission`), not the underlying model name (`gpt-5-mini`) — the two
+  are frequently different, and it's the deployment name the API actually
+  routes on.
+- **`async_client=async_client`** is what makes `OpenAIChatCompletion`
+  generic rather than Azure-specific: instead of the connector building its
+  own client internally from env vars (which is what happens if
+  `async_client` is omitted), it just uses whatever client it's handed —
+  including one already pointed at a non-standard `base_url` like Foundry's
+  `/openai/v1` endpoint.
+- **`AZURE_OPENAI_API_KEY` only has to flow through `AsyncOpenAI`'s
+  constructor once.** `OpenAIChatCompletion` never sees `.env`'s API key
+  directly — it only has the `async_client` object, which already carries
+  the key internally.
+
 ## What `main.py` demonstrates
 
 Each step prints its own output so you can see it work in isolation:
