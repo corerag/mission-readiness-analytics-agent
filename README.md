@@ -79,6 +79,44 @@ Each step prints its own output so you can see it work in isolation:
    model an error message it can respond to gracefully, with no extra code
    required on our end.
 
+## Persona setup
+
+`SYSTEM_PERSONA` is one plain string, defined once near the top of
+`main.py`:
+
+```python
+SYSTEM_PERSONA = (
+    "You are the Mission Readiness Analytics Agent, an assistant that helps "
+    "commanders and analysts interpret unit readiness data. You are precise, "
+    "concise, and speak in a professional military-analytics tone. When you "
+    "are uncertain or lack data, say so plainly instead of guessing."
+)
+```
+
+A system message isn't a separate configuration channel — it's just the
+first entry in whatever message list gets sent to the model, with role
+`system` instead of `user`/`assistant`. That means `SYSTEM_PERSONA` has to
+be injected wherever a conversation starts, and `main.py` does that in two
+different places, because it drives conversations two different ways:
+
+- **`ChatHistory`** — `history.add_system_message(SYSTEM_PERSONA)` is called
+  once, right after `history = ChatHistory()`, before any user turns are
+  added. Every `get_chat_message_content(...)` call that reuses `history`
+  afterward automatically carries the persona along, since it's just message
+  #0 in the list being sent each time.
+- **`CONFIRM_STATUS_PROMPT`** — the prompt function has its *own*, separate
+  conversation (rendered fresh by `kernel.invoke(...)`, not the shared
+  `history` object), so the persona is embedded directly in the template via
+  a `<message role="system">` tag rather than relying on external state.
+  This keeps the function self-contained: it produces a correctly-personaed
+  response no matter where it's invoked from, without depending on the
+  caller to have set up a `ChatHistory` first.
+
+After `confirm_status` runs, `main.py` re-adds the persona to `history`
+(`history.add_system_message(SYSTEM_PERSONA)`) so the rest of the
+conversation — everything from that point on — stays consistent with what
+the prompt function already established.
+
 ## `CONFIRM_STATUS_PROMPT` topics
 
 `confirm_status` (built from `CONFIRM_STATUS_PROMPT`) takes one template
