@@ -79,6 +79,32 @@ Each step prints its own output so you can see it work in isolation:
    model an error message it can respond to gracefully, with no extra code
    required on our end.
 
+## `CONFIRM_STATUS_PROMPT` topics
+
+`confirm_status` (built from `CONFIRM_STATUS_PROMPT`) takes one template
+variable, `{{$topic}}`, filled in via `KernelArguments(topic=...)` at
+invocation time:
+
+```python
+CONFIRM_STATUS_PROMPT = (
+    f'<message role="system">{SYSTEM_PERSONA}</message>\n'
+    '<message role="user">In one sentence, confirm you\'re online and ready to help track {{$topic}}.</message>'
+)
+```
+
+`main.py` calls it with `topic="mission readiness"`, but any short noun
+phrase works — the persona and phrasing stay fixed, only the subject
+changes:
+
+- `"mission readiness"` (used in `main.py`)
+- `"personnel readiness"`
+- `"equipment status"`
+- `"supply levels"`
+
+This is what makes it a *reusable* `KernelFunction` rather than a one-off
+string: the template is registered once in `build_kernel()`, and each call
+site supplies its own `topic` without touching the function definition.
+
 ## Notes
 
 - `.env` holds live credentials and is gitignored — never commit it.
