@@ -218,6 +218,36 @@ This is what makes it a *reusable* `KernelFunction` rather than a one-off
 string: the template is registered once in `build_kernel()`, and each call
 site supplies its own `topic` without touching the function definition.
 
+## Native function plugin registration
+
+`ReadinessDataPlugin` is registered once, in `build_kernel()`:
+
+```python
+kernel.add_plugin(ReadinessDataPlugin(), plugin_name="ReadinessData")
+```
+
+- **`@kernel_function(name=..., description=...)`** marks a plain Python
+  method as something the Kernel can invoke. `get_unit_status` and
+  `compare_units` are both decorated this way in `ReadinessDataPlugin` — the
+  `description` matters beyond documentation, since it's also what the model
+  reads when deciding whether to call the function during automatic function
+  calling.
+- **`kernel.add_plugin(instance, plugin_name=...)`** is different from the
+  `kernel.add_function(...)` used for `confirm_status`: instead of
+  registering one function by hand, it scans the given instance for *every*
+  `@kernel_function`-decorated method and registers each one under
+  `plugin_name` in a single call. `_lookup` isn't decorated, so it's never
+  registered or callable through the Kernel — it stays a private Python
+  helper the two `@kernel_function` methods share internally.
+- **This is why adding `compare_units` required no changes to
+  `build_kernel()`.** It only had to be added to the `ReadinessDataPlugin`
+  class body, decorated with `@kernel_function`; `kernel.add_plugin(...)`
+  picked it up automatically the next time the kernel was built. Both
+  functions end up addressable the same way afterward —
+  `kernel.plugins["ReadinessData"]["get_unit_status"]` /
+  `kernel.plugins["ReadinessData"]["compare_units"]` — and invocable
+  identically via `kernel.invoke(function, KernelArguments(...))`.
+
 ## `get_unit_status` and `compare_units` topics
 
 Unlike `confirm_status`'s free-form `{{$topic}}`, these two native functions
