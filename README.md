@@ -447,13 +447,17 @@ read side by side. `main.py` and Semantic Kernel are untouched.
 .venv\Scripts\python main_af.py
 ```
 
-`agent-framework-core` + `agent-framework-openai` is the lean install — only
-what `main_af.py` actually imports. There's also a plain `agent-framework`
-meta-package (what this project's `.venv` actually has installed) that pulls
-in *every* optional connector — Anthropic, Bedrock, Gemini, Azure AI Search,
-A2A, DevUI, and more — which is convenient for exploring but far more than
-this file needs. No new `.env` variables — `main_af.py` reads the same three
-Foundry values `main.py` does.
+`agent-framework-core` + `agent-framework-openai` is the lean install this
+project actually uses — only what `main_af.py` imports. There's also a plain
+`agent-framework` meta-package that pulls in *every* optional connector —
+Anthropic, Bedrock, Gemini, Azure AI Search, A2A, DevUI, and more — which is
+convenient for exploring but far more than this file needs; an earlier
+version of this `.venv` had that meta-package installed instead, purely from
+following an upstream quickstart, and swapping to the two lean packages above
+(`pip uninstall agent-framework` and every `agent-framework-*` connector it
+pulled in, then `pip install agent-framework-core agent-framework-openai`)
+made no difference to `main_af.py`'s behavior. No new `.env` variables —
+`main_af.py` reads the same three Foundry values `main.py` does.
 
 ## Concept map: SK → Agent Framework
 
