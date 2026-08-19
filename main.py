@@ -11,7 +11,7 @@ from semantic_kernel.connectors.ai.open_ai import (
     OpenAIChatCompletion,
     OpenAIChatPromptExecutionSettings,
 )
-from semantic_kernel.contents import ChatHistory
+from semantic_kernel.contents import ChatHistory, FunctionCallContent, FunctionResultContent
 from semantic_kernel.exceptions import KernelInvokeException
 from semantic_kernel.functions import KernelArguments, kernel_function
 
@@ -64,9 +64,31 @@ class ReadinessDataPlugin:
     """
 
     _MOCK_READINESS: dict[str, dict[str, object]] = {
-        "alpha company": {"percent": 78, "notes": "2 vehicles down for maintenance, full personnel strength."},
-        "bravo company": {"percent": 92, "notes": "fully equipped, no outstanding maintenance issues."},
-        "charlie company": {"percent": 61, "notes": "awaiting an ammunition resupply, one squad on leave."},
+        "alpha company": {
+            "name": "Alpha Company",
+            "percent": 78,
+            "notes": "2 vehicles down for maintenance, full personnel strength.",
+        },
+        "bravo company": {
+            "name": "Bravo Company",
+            "percent": 92,
+            "notes": "fully equipped, no outstanding maintenance issues.",
+        },
+        "charlie company": {
+            "name": "Charlie Company",
+            "percent": 61,
+            "notes": "awaiting an ammunition resupply, one squad on leave.",
+        },
+        "2nd battalion": {
+            "name": "2nd Battalion",
+            "percent": 85,
+            "notes": "fully staffed, minor equipment backlog clearing this week.",
+        },
+        "3rd battalion": {
+            "name": "3rd Battalion",
+            "percent": 70,
+            "notes": "reduced personnel strength, two platoons on training rotation.",
+        },
     }
 
     def _lookup(self, unit: str) -> tuple[str, dict[str, object]]:
@@ -75,7 +97,7 @@ class ReadinessDataPlugin:
             record = self._MOCK_READINESS[key]
         except KeyError:
             raise UnitNotFoundError(f"No readiness data on file for '{unit}'.") from None
-        return key.title(), record
+        return record["name"], record
 
     @kernel_function(
         name="get_unit_status",
@@ -244,6 +266,29 @@ async def main() -> None:
     )
     print(f"Assistant (auto function calling, comparison): {comparison_response}")
     history.add_message(comparison_response)
+
+    # One more comparison question, this time over units that aren't Companies,
+    # to confirm compare_units gets picked for any two named units, not just the
+    # ones used in the earlier example. Recording len(history.messages) before the
+    # call lets us isolate exactly what the auto-invoke loop appended, since it
+    # mutates `history` in place (see the ChatHistory setup section in the README).
+    history_len_before = len(history.messages)
+    history.add_user_message("How ready is 2nd Battalion compared to 3rd Battalion?")
+    battalion_response = await chat_service.get_chat_message_content(
+        chat_history=history, settings=auto_settings, kernel=kernel
+    )
+    print(f"Assistant (auto function calling, battalion comparison): {battalion_response}")
+    history.add_message(battalion_response)
+
+    print("\nChatHistory entries added by this call:")
+    for message in history.messages[history_len_before:]:
+        for item in message.items:
+            if isinstance(item, FunctionCallContent):
+                print(f"  [{message.role}] tool call -> {item.function_name}({item.arguments})")
+            elif isinstance(item, FunctionResultContent):
+                print(f"  [{message.role}] tool result <- {item.result}")
+            else:
+                print(f"  [{message.role}] {type(item).__name__}: {item}")
 
 
 if __name__ == "__main__":

@@ -259,6 +259,8 @@ otherwise has to match one of:
 - `"Alpha Company"` — 78% ready, 2 vehicles down for maintenance
 - `"Bravo Company"` — 92% ready, fully equipped
 - `"Charlie Company"` — 61% ready, awaiting ammunition resupply
+- `"2nd Battalion"` — 85% ready, minor equipment backlog clearing
+- `"3rd Battalion"` — 70% ready, two platoons on training rotation
 
 Anything else raises `UnitNotFoundError` — see the *Error handling* point
 above for how that's caught (directly, via `kernel.invoke`) or handled
@@ -294,11 +296,82 @@ auto_settings = OpenAIChatPromptExecutionSettings(
   in `main.py` passes it, because the Kernel needs it to resolve and invoke
   whichever function the model chooses.
 
-This same `auto_settings` object is reused across all three auto
+This same `auto_settings` object is reused across all four auto
 function-calling calls in `main.py` (the Charlie Company question, the
-unknown-unit question, and the comparison question) — the model re-decides
-what to do each time based on the current `ChatHistory`, not anything cached
-from the previous call.
+unknown-unit question, the Alpha/Charlie comparison, and the battalion
+comparison) — the model re-decides what to do each time based on the
+current `ChatHistory`, not anything cached from the previous call.
+
+### Inspecting what actually landed in `ChatHistory`
+
+The printed assistant reply is only the *last* message the auto-invoke loop
+produces. To see the tool call and tool result in between, record
+`len(history.messages)` before the call and diff against it after:
+
+```python
+history_len_before = len(history.messages)
+history.add_user_message("How ready is 2nd Battalion compared to 3rd Battalion?")
+battalion_response = await chat_service.get_chat_message_content(
+    chat_history=history, settings=auto_settings, kernel=kernel
+)
+history.add_message(battalion_response)
+
+for message in history.messages[history_len_before:]:
+    for item in message.items:
+        if isinstance(item, FunctionCallContent):
+            print(f"  [{message.role}] tool call -> {item.function_name}({item.arguments})")
+        elif isinstance(item, FunctionResultContent):
+            print(f"  [{message.role}] tool result <- {item.result}")
+```
+
+For that question, four entries land in `history` from one
+`get_chat_message_content` call:
+
+```
+[AuthorRole.USER] TextContent: How ready is 2nd Battalion compared to 3rd Battalion?
+[AuthorRole.ASSISTANT] tool call -> compare_units({"unit_a":"2nd Battalion","unit_b":"3rd Battalion"})
+[AuthorRole.TOOL] tool result <- 2nd Battalion (85% ready) is more mission-ready than 3rd Battalion (70% ready) by 15 percentage points.
+[AuthorRole.ASSISTANT] TextContent: 2nd Battalion is 85% ready versus 3rd Battalion at 70%...
+```
+
+The `ASSISTANT` tool-call message and the `TOOL` result message are the two
+entries SK's auto-invoke loop adds on its own (see *`ChatHistory` gets
+mutated by Semantic Kernel too* above) — only the first `USER` message and
+the final `ASSISTANT` text reply came from code we wrote directly.
+
+## Automatic function calling vs. the older Planner classes
+
+Semantic Kernel used to offer explicit **Planner** classes —
+`SequentialPlanner`, `ActionPlanner`, `BasicPlanner`, `StepwisePlanner` —
+now deprecated in favor of `FunctionChoiceBehavior`. They solved the same
+problem (let an LLM decide which functions to call) in a fundamentally
+different, older way:
+
+- **Planners made a separate call to *plan*, before any execution
+  happened.** You gave a planner a natural-language goal, and it used its
+  own specially engineered prompt template — not the model's native
+  tool-calling — to get the LLM to emit an explicit `Plan` object: a
+  sequence of function calls with inputs/outputs wired between steps. Only
+  after that plan existed did you execute it, either all at once
+  (`SequentialPlanner`) or one step at a time with re-planning in between
+  (`StepwisePlanner`, a ReAct-style loop).
+- **`FunctionChoiceBehavior.Auto()` doesn't plan ahead of time at all.**
+  There's no separate `Plan` object and no dedicated planning call. It rides
+  directly on the model provider's own native tool-calling mechanism
+  (OpenAI's `tools`/`tool_calls` fields), inline within a single
+  `get_chat_message_content` call: the model returns either text or a tool
+  call, and if it's a tool call, SK's auto-invoke loop (in
+  `chat_completion_client_base.py`) invokes the function, appends the
+  result to `ChatHistory`, and calls the model again — repeating until it
+  gets a plain text response or hits `maximum_auto_invoke_attempts`. The
+  `USER` → `ASSISTANT` (tool call) → `TOOL` (result) → `ASSISTANT` (text)
+  sequence shown above *is* that loop, captured in `ChatHistory`.
+- **The tradeoff:** Planners worked with any model, including ones with no
+  native tool-calling support, because SK did the reasoning-about-function-
+  use itself via prompting. `FunctionChoiceBehavior.Auto()` needs a model
+  with real native tool-calling — but is simpler (a settings flag, no
+  planner object to construct), and doesn't need a separate planning
+  round-trip before execution can start.
 
 ## Error handling
 
