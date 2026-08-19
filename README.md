@@ -652,3 +652,224 @@ as the discriminator instead — the loop branches on `content.type == "..."`.
 `gpt-5-mini` being a reasoning model, you'll also see `"text_reasoning"`
 content entries in the output that have no SK counterpart in this demo at
 all — that's a model capability showing through, not a framework concept.
+
+---
+
+# Step 3: Azure AI Foundry Agent Service (`main_agent_service.py`)
+
+Steps 1 and 2 both talk to the Foundry deployment the same way: a chat-
+completions call from a client library running entirely in your own process,
+with the model connection, persona, tools, and conversation history all held
+locally. The **Agent Service** (`azure-ai-agents`) is a different thing —
+Foundry hosts the agent itself. `create_agent(...)` creates a persistent
+resource in the Foundry project (visible in the portal, outliving this
+script's process), and every conversation lives on a **thread**, a
+server-side object the service manages, not a list in your Python process.
+`main_agent_service.py` sits next to `main.py` and `main_af.py` and
+recreates the same Mission Readiness agent — same persona, same
+`ReadinessDataPlugin` mock data and method bodies, same sequence of
+demonstrations — on top of this fundamentally different architecture.
+
+## Setup
+
+```bash
+.venv\Scripts\pip install azure-ai-agents azure-identity python-dotenv   # Windows
+# source .venv/bin/activate && pip install azure-ai-agents azure-identity python-dotenv  # macOS/Linux
+```
+
+Four new `.env` values are required beyond Steps 1–2's three — see
+`.env.example`:
+
+```
+AZURE_TENANT_ID=<your-azure-ad-tenant-id>
+AZURE_CLIENT_ID=<your-service-principal-app-id>
+AZURE_CLIENT_SECRET=<your-service-principal-secret>
+AZURE_AI_PROJECT_ENDPOINT=https://<your-resource-name>.services.ai.azure.com/api/projects/<your-project-name>
+```
+
+Verify the connection *before* running the full agent — `AgentsClient`
+happily constructs against a wrong endpoint or an under-permissioned
+principal and only fails once you try to use it, which is expensive to
+debug from inside a multi-step demo script:
+
+```bash
+.venv\Scripts\python probe_foundry_agent_service.py
+```
+
+It authenticates, builds an `AgentsClient`, and calls `list_agents(limit=1)`
+— read-only, creates nothing — printing which of those three steps failed
+and why. Once it prints "Connection to Foundry Agent Service verified", run
+the real thing:
+
+```bash
+.venv\Scripts\python main_agent_service.py
+```
+
+## A gotcha worth knowing
+
+Getting the probe to pass end-to-end took three separate fixes, each with an
+error message that didn't point at the actual problem:
+
+1. **`AZURE_AI_PROJECT_ENDPOINT` needs the project path, not just the
+   resource host.** `https://<resource>.services.ai.azure.com` (the value
+   Steps 1–2's `AZURE_OPENAI_ENDPOINT` is built from) 404s against the Agent
+   Service. It needs the project-scoped form:
+   `https://<resource>.services.ai.azure.com/api/projects/<project-name>` —
+   found on the project's Overview page in the Foundry portal, not the
+   resource's, and not derivable from the resource name alone.
+2. **`Contributor` does not grant data-plane access.** With the endpoint
+   fixed, the same call failed with `401 PermissionDenied`, naming a missing
+   data action (`Microsoft.CognitiveServices/accounts/AIServices/agents/read`).
+   Azure's control-plane roles (`Contributor`, `Owner`) only grant
+   `actions` — managing the resource — never `dataActions`, which is what
+   calling the resource's own API requires. Cognitive Services' generic
+   `Azure AI Developer` role doesn't cover it either; its own description
+   says as much: *"For Foundry project access, use the Foundry User or
+   Foundry Owner roles instead."*
+3. **The role has to be assigned at the *project* scope, not the account
+   scope.** Assigning `Foundry User` on the parent resource
+   (`.../accounts/coffeyaveryon-2061-resource`) still 401'd — RBAC on a
+   Foundry project's child resource (`.../accounts/<resource>/projects/<project>`)
+   doesn't reliably inherit from the parent account the way ARM scoping
+   normally works. The fix was assigning `Foundry User` again, directly on
+   the project resource.
+
+None of these three surfaces as "wrong endpoint" / "wrong role" / "wrong
+scope" in the error text — the first is a 404 with no hint about *why* the
+resource wasn't found, and the second and third produce the identical 401
+message. `probe_foundry_agent_service.py` bakes in a specific hint for each
+status code so a future setup doesn't have to rediscover this from scratch.
+
+## Concept map: Agent Framework → Agent Service
+
+| Agent Framework (`main_af.py`) | Agent Service (`main_agent_service.py`) | Relationship |
+|---|---|---|
+| `AZURE_OPENAI_API_KEY` | `ClientSecretCredential(tenant_id, client_id, client_secret)` | Genuinely new requirement — the Agent Service has no API-key auth path at all; it's Entra ID only. |
+| `OpenAIChatClient(model=..., async_client=...)` | `AgentsClient(endpoint=..., credential=...)` | Both are the connection object, but this one talks to the Agent Service's own REST API, not a chat-completions endpoint. |
+| `chat_client.as_agent(...)` returns an in-process `Agent` | `client.create_agent(...)` creates a resource in the Foundry project | The AF `Agent` vanishes when the script exits; the Agent Service one persists until deleted — see `client.delete_agent(...)` in the `finally` block. |
+| `@tool(name=..., description=...)` | plain method + Sphinx `:param name: ...` docstring | `FunctionTool` builds the JSON schema by parsing the docstring; there's no decorator to hang metadata on. |
+| `tools=[plugin.get_unit_status, plugin.compare_units]` on the agent | `ToolSet()` + `FunctionTool(functions={...})` passed to `create_agent`, *and* `client.enable_auto_function_calls(toolset)` | Two steps where AF had one: attaching tool defs to the agent (what the model sees) is separate from registering local execution (what actually runs the Python). |
+| plain `list[Message]`, appended and `.extend()`-ed by hand | `client.threads.create()`, an `AgentThread` | Conversation state moves from your process to the service — no local list to build, mutate, or forget to extend. |
+| `agent.run(history)` | `client.messages.create(thread_id=..., ...)` then `client.runs.create_and_process(thread_id=..., agent_id=...)` | Sending a message and running the agent are two separate calls against the thread, not one call that returns a response object. |
+| tools auto-invoked on every `run()` once attached to the agent | tools auto-invoked during `create_and_process` once `enable_auto_function_calls` was called | Same default-on behavior, but it's a client-level registration, not something implied by attaching tools to the agent. |
+| `function_invocation_configuration={"include_detailed_errors": True}` (opt-in) | *(no equivalent — always on)* | `FunctionTool.execute()` unconditionally catches exceptions and JSON-encodes the message; there's no flag to turn detailed errors off, the way AF defaults to generic ones. |
+| `content.type` discriminator on `response.messages` | `client.run_steps.list(thread_id=..., run_id=...)`, a separate call | Tool-call inspection isn't part of the reply at all — it's a different endpoint, and (in this SDK version) it exposes the call's name/arguments but not its output. |
+| async throughout (`await agent.run(...)`) | fully synchronous | `create_and_process` already blocks internally, polling the run until it's done — there's no `asyncio.run(main())` in this file at all. |
+
+## Walkthrough
+
+### 1. Authentication and client construction
+
+`ClientSecretCredential(tenant_id=..., client_id=..., client_secret=...)` is
+the one genuinely new prerequisite versus Steps 1–2: the Agent Service
+authenticates every call via Entra ID, so there's no `api_key=...` shortcut
+the way `AsyncOpenAI` has one. `AgentsClient(endpoint=..., credential=...)`
+is then a direct parallel to `OpenAIChatClient(...)` — the object every
+subsequent call goes through — just aimed at
+`AZURE_AI_PROJECT_ENDPOINT` (the project-scoped URL from *A gotcha worth
+knowing* above) instead of the `/openai/v1` endpoint.
+
+### 2. Tools — `ReadinessDataPlugin`
+
+Same class name, same `_MOCK_READINESS` data, same method bodies as
+`main.py`/`main_af.py`. What's different is how each method advertises
+itself: no `@kernel_function`/`@tool` decorator exists here to carry a
+`name=`/`description=`. Instead, `FunctionTool` reflects on the plain
+function — the docstring's first line becomes the tool's description, and
+`:param name: ...` lines become each argument's description. Skip the
+docstring and the model sees "No description" for that parameter, so unlike
+the other two files, the docstring isn't optional documentation here — it
+*is* the schema.
+
+Wiring a tool up for use is two steps, not one:
+
+```python
+toolset = ToolSet()
+toolset.add(FunctionTool(functions={plugin.get_unit_status, plugin.compare_units}))
+client.enable_auto_function_calls(toolset)
+
+agent = client.create_agent(model=..., instructions=SYSTEM_PERSONA, toolset=toolset)
+```
+
+`toolset=toolset` on `create_agent` is what gives the *model* the tool
+definitions. `enable_auto_function_calls(toolset)` is a separate,
+client-level registration that's what lets `runs.create_and_process` (below)
+actually *execute* the matching Python function when the model calls one —
+`main_af.py`'s single `tools=[...]` argument on `as_agent(...)` did both
+jobs at once.
+
+### 3. Conversation state — threads, not a list
+
+There's no `list[Message]` in this file at all. `client.threads.create()`
+returns an `AgentThread`; every message posted to it
+(`client.messages.create(thread_id=..., role=..., content=...)`) and every
+reply the agent gives becomes part of that thread, held by the service.
+Asking "What did you just say, word for word?" as a follow-up just works
+with no history to build or `.extend()` — the thread already has the first
+exchange on it. The tradeoff for that convenience: unlike AF's in-process
+`Agent`, the thread (like the agent itself) is a resource that outlives the
+script unless explicitly deleted, which is why both get cleaned up in a
+`finally` block via `client.threads.delete(thread.id)` and
+`client.delete_agent(agent.id)`.
+
+### 4. Running the agent — `runs.create_and_process`
+
+```python
+client.messages.create(thread_id=thread_id, role=MessageRole.USER, content=text)
+run = client.runs.create_and_process(thread_id=thread_id, agent_id=agent_id)
+```
+
+`create_and_process` is a blocking, poll-until-done helper: it starts the
+run, polls `run.status`, and — because `enable_auto_function_calls` was
+called earlier — executes any `requires_action` tool calls locally and
+resubmits their outputs, looping until the run reaches a terminal status.
+There's no `await`-and-get-a-response-object step the way `agent.run(...)`
+returns one; by the time this call returns, the entire exchange (including
+any tool calls) already happened, and the reply has to be fetched
+separately with `client.messages.get_last_message_text_by_role(thread_id=...,
+role=MessageRole.AGENT)`. This is also why the whole file is synchronous —
+`create_and_process` already does its own polling internally, so there's
+nothing left for `asyncio` to do.
+
+### 5. Error handling
+
+Direct calls behave exactly like `main_af.py`:
+`plugin.get_unit_status(unit="Delta Company")` raises `UnitNotFoundError`
+completely unwrapped, since it's just calling plain Python.
+
+Auto function calling is where this file has no equivalent to AF's
+`include_detailed_errors` toggle. `FunctionTool.execute()`
+unconditionally catches every exception a tool raises and feeds the model
+back a JSON string —
+`{"error": "Error executing function 'get_unit_status': No readiness data on file for 'Delta Company'."}`
+— rather than either a generic failure (AF's default) or a bare re-raise.
+The real message reaches the model either way; there's just no flag here to
+choose between "generic" and "detailed" the way `main_af.py`'s
+`function_invocation_configuration` does. Same as the other two files, the
+SDK also logs this at `WARNING` internally
+(`"Error executing function ..."`, `"Tool outputs contain errors - retrying"`
+under the `azure.ai.agents` logger) regardless of it being an expected,
+deliberately-triggered failure — raised to `CRITICAL` for the same reason
+`main.py`/`main_af.py` do it for their own loggers.
+
+### Inspecting tool calls — run steps, not message content
+
+`main_af.py` finds tool-call detail by looking at `content.type` on the
+messages a `run()` call returned. There's no equivalent on this file's reply
+object at all — tool-call detail lives in a completely separate resource,
+**run steps**, fetched per-run:
+
+```python
+last_run = list(client.runs.list(thread_id=thread.id, limit=1))[0]
+for step in client.run_steps.list(thread_id=thread.id, run_id=last_run.id):
+    if step.step_details.type == "tool_calls":
+        for tool_call in step.step_details.tool_calls:
+            if tool_call.type == "function":
+                print(f"  tool call -> {tool_call.function.name}({tool_call.function.arguments})")
+```
+
+**Worth knowing:** `RunStepFunctionToolCallDetails` in this SDK version
+exposes the call's `name` and `arguments` — what the model asked for — but
+not its `output`. Unlike `main_af.py`'s `function_result` content, which
+shows the tool's return value directly, the executed result here only shows
+up indirectly, in the assistant's final reply text.
