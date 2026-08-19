@@ -157,6 +157,50 @@ unknown-unit question, and the comparison question) — the model re-decides
 what to do each time based on the current `ChatHistory`, not anything cached
 from the previous call.
 
+## Error handling
+
+`ReadinessDataPlugin._lookup` raises `UnitNotFoundError` (a plain
+`Exception` subclass defined in `main.py`) for any unit not in
+`_MOCK_READINESS`, instead of silently returning a "not found" string. Both
+`get_unit_status` and `compare_units` call `_lookup` internally, so both get
+this for free. Deliberately raising here — rather than returning a
+soft-fallback string — matters because it's what lets a caller (our own code
+or the model) recognize the failure as a distinct, structured error case,
+not just another string it might mistake for real data.
+
+That exception is handled differently depending on how the function was
+invoked:
+
+- **Direct `kernel.invoke(function, KernelArguments(...))`** — the Kernel
+  doesn't let the original exception through as-is. It wraps whatever was
+  raised in `KernelInvokeException`, with `UnitNotFoundError` attached as
+  `__cause__`. So `main.py` catches `KernelInvokeException` and unwraps it:
+
+  ```python
+  try:
+      await kernel.invoke(get_unit_status, KernelArguments(unit="Delta Company"))
+  except KernelInvokeException as exc:
+      if isinstance(exc.__cause__, UnitNotFoundError):
+          print(f"Native function raised as expected: {exc.__cause__}")
+      else:
+          raise
+  ```
+
+- **Automatic function calling** — no code of ours is involved at all. SK's
+  internal auto-invoke loop catches the exception itself, turns it into an
+  error message, and feeds that back to the model as the tool's result. The
+  model then responds to *that* — in `main.py`'s case, by asking for the
+  correct unit designation instead of fabricating readiness numbers.
+
+One side effect worth knowing about: Semantic Kernel logs every
+function-invocation failure at `ERROR` level internally
+(`logger.exception`/`logger.error` in `kernel.py`), regardless of whether
+the calling code goes on to handle it — including our expected
+`UnitNotFoundError` cases. `main.py` raises the `semantic_kernel` logger to
+`CRITICAL` (see the *Notes* section below) specifically to keep that
+internal noise out of the console output, without touching any of the
+`try`/`except` logic above.
+
 ## Notes
 
 - `.env` holds live credentials and is gitignored — never commit it.
