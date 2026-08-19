@@ -123,6 +123,40 @@ automatically (via the auto function-calling loop) depending on the call
 site. `main.py`'s `"Delta Company"` calls exist specifically to exercise
 that path.
 
+## Automatic function calling settings
+
+Automatic function calling is turned on per-call, not globally, by building
+a separate `OpenAIChatPromptExecutionSettings` with
+`function_choice_behavior` set:
+
+```python
+auto_settings = OpenAIChatPromptExecutionSettings(
+    function_choice_behavior=FunctionChoiceBehavior.Auto(
+        filters={"included_plugins": ["ReadinessData"]}
+    )
+)
+```
+
+- **`FunctionChoiceBehavior.Auto(...)`** lets the model decide, per request,
+  whether to call a function at all — as opposed to `.Required()` (must call
+  one) or `.NoneInvoke()` (functions are visible but never auto-invoked).
+- **`filters={"included_plugins": ["ReadinessData"]}`** scopes which
+  functions the model is even offered. Here it's deliberately narrowed to
+  just the `ReadinessData` plugin (`get_unit_status`, `compare_units`) so the
+  model can't try to "call" `confirm_status` — a prompt function, not
+  something meant to be invoked as a tool. Other supported filter keys:
+  `excluded_plugins`, `included_functions`, `excluded_functions`.
+- **`kernel=kernel` at the call site is required**, not optional — every
+  `get_chat_message_content(..., settings=auto_settings, kernel=kernel)` call
+  in `main.py` passes it, because the Kernel needs it to resolve and invoke
+  whichever function the model chooses.
+
+This same `auto_settings` object is reused across all three auto
+function-calling calls in `main.py` (the Charlie Company question, the
+unknown-unit question, and the comparison question) — the model re-decides
+what to do each time based on the current `ChatHistory`, not anything cached
+from the previous call.
+
 ## Notes
 
 - `.env` holds live credentials and is gitignored — never commit it.
