@@ -119,6 +119,41 @@ Each step prints its own output so you can see it work in isolation:
    model an error message it can respond to gracefully, with no extra code
    required on our end.
 
+## `ChatHistory` setup
+
+`main.py` builds one `ChatHistory` object and threads it through the rest of
+`main()` by hand, rather than calling `kernel.invoke_prompt(...)` per
+question:
+
+```python
+history = ChatHistory()
+history.add_system_message(SYSTEM_PERSONA)
+history.add_user_message(f"In one sentence, confirm you're online and ready to help track {topic}.")
+history.add_assistant_message(first_response_text)
+```
+
+- **`kernel.invoke_prompt()` is stateless** — each call is an isolated
+  request with no memory of previous ones. `ChatHistory` is what memory
+  actually is here: a plain list of messages that gets resent to the model
+  in full on every call, so "the model remembers" just means "the client
+  keeps sending the whole transcript so far."
+- **`add_system_message` / `add_user_message` / `add_assistant_message` /
+  `add_message`** append to that list with the corresponding role.
+  `add_message` is the general form — used when appending an already-built
+  `ChatMessageContent` (like a response the model just returned) rather than
+  a plain string.
+- **`get_chat_message_content(chat_history=history, settings=...)`** is what
+  actually sends `history` to the model. `main.py` calls it repeatedly on
+  the same `history` object, appending each new question with
+  `add_user_message` and each reply with `add_message` before the next
+  call — that accumulation is the entire mechanism multi-turn memory relies
+  on.
+- **`history` gets mutated by Semantic Kernel too, not just by us.** During
+  automatic function calling, the auto-invoke loop appends the model's tool
+  call and the function's result as their own entries directly into
+  `history` — so by the end of `main.py`, `history` contains a mix of
+  messages we added explicitly and ones SK added on our behalf.
+
 ## Persona setup
 
 `SYSTEM_PERSONA` is one plain string, defined once near the top of
